@@ -42,6 +42,10 @@
 #define CLIENT 0
 #define SERVER 1
 #define PORT 55555
+#define PASSWD_PATH "passwd"
+#define PASSWD_BUF  100
+
+static char pbuf[PASSWD_BUF];
 
 int debug;
 char *progname;
@@ -168,7 +172,33 @@ void usage(void) {
   fprintf(stderr, "-p <port>: port to listen on (if run in server mode) or to connect to (in client mode), default 55555\n");
   fprintf(stderr, "-u|-a: use TUN (-u, default) or TAP (-a)\n");
   fprintf(stderr, "-d: outputs debug information while running\n");
+  fprintf(stderr, "-w: password authentication\n");
   fprintf(stderr, "-h: prints this help text\n");
+  exit(1);
+}
+
+/**************************************************************************
+ * readpasswd: server read password from plantext file and return password*
+ **************************************************************************/
+const char *readpasswd() {
+  FILE *passwd = NULL;
+  memset(pbuf, 0, sizeof(pbuf));
+  if(access(PASSWD_PATH, F_OK) != 0) {
+    fprintf(stderr, "SERVER: there is no %s file\n", PASSWD_PATH);
+    exit(1);
+  }
+
+  if((passwd = fopen(PASSWD_PATH, "r")) == 0) {
+    fprintf(stderr, "SERVER: can't open %s\n", PASSWD_PATH);
+    exit(1);
+  }
+
+  if(fgets(pbuf, PASSWD_BUF, passwd) != NULL) {
+    fclose(passwd);
+    return pbuf;
+  }
+
+  perror("readpasswd()");
   exit(1);
 }
 
@@ -187,11 +217,12 @@ int main(int argc, char *argv[]) {
   socklen_t remotelen;
   int cliserv = -1;    /* must be specified on cmd line */
   unsigned long int tap2net = 0, net2tap = 0;
+  char clipassword[PASSWD_BUF] = "";
 
   progname = argv[0];
   
   /* Check command line options */
-  while((option = getopt(argc, argv, "i:sc:p:uahd")) > 0) {
+  while((option = getopt(argc, argv, "i:sc:p:w:uahd")) > 0) {
     switch(option) {
       case 'd':
         debug = 1;
@@ -217,6 +248,9 @@ int main(int argc, char *argv[]) {
         break;
       case 'a':
         flags = IFF_TAP;
+        break;
+      case 'w':
+        strncpy(clipassword, optarg, PASSWD_BUF);
         break;
       default:
         my_err("Unknown option %c\n", option);
@@ -273,7 +307,18 @@ int main(int argc, char *argv[]) {
 
     net_fd = sock_fd;
     do_debug("CLIENT: Connected to server %s\n", inet_ntoa(remote.sin_addr));
-    
+
+    /* send password by client*/
+    send(net_fd, clipassword, PASSWD_BUF, 0);
+    char is_correct[2];
+    recv(net_fd, is_correct, sizeof(is_correct), 0);
+    if(!atoi(is_correct)) { // failed
+      fprintf(stderr, "connect failed, wrong password.\n");
+      exit(1);
+    } else {
+      fprintf(stdout, "connected, tunnel established.\n");
+    }
+
   } else {
     /* Server, wait for connections */
 
@@ -306,6 +351,23 @@ int main(int argc, char *argv[]) {
     }
 
     do_debug("SERVER: Client connected from %s\n", inet_ntoa(remote.sin_addr));
+
+    /* server read password */
+    readpasswd();
+    fprintf(stdout, "SERVER: Password in server is %s\n", pbuf);
+
+    /* check password is correct */
+    char recvpasswd[PASSWD_BUF] = {'\0'};
+    recv(net_fd, recvpasswd, PASSWD_BUF, 0);
+    fprintf(stdout, "SERVER: Password send by Client is %s\n", recvpasswd);
+    if(strcmp(recvpasswd, pbuf)) { // password is wrong
+      char unmatch[] = "0";
+      send(net_fd, unmatch, sizeof(unmatch), 0);
+      exit(1);
+    } else {
+      char match[] = "1";
+      send(net_fd, match, sizeof(match), 0);
+    }
   }
   
   /* use select() to handle two descriptors at once */
